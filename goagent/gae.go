@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 )
 
 const (
@@ -31,10 +32,26 @@ func (g *GAERequestFilter) encodeRequest(req *http.Request) (*http.Request, erro
 	var b bytes.Buffer
 	var err error
 	w, err := flate.NewWriter(&b, 9)
+	defer w.Close()
 	if err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(w, "%s %s %s\r\n%s\r\n", req.Method, req.URL.String(), req.Proto, req.Header)
+	_, err = fmt.Fprintf(w, "%s %s %s\r\n", req.Method, req.URL.String(), req.Proto)
+	if err != nil {
+		return nil, err
+	}
+	for key, values := range req.Header {
+		for _, value := range values {
+			_, err := fmt.Fprintf(w, "%s: %s\r\n", key, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	_, err = w.Write([]byte("\r\n"))
+	if err != nil {
+		return nil, err
+	}
 	err = w.Flush()
 	if err != nil {
 		return nil, err
@@ -47,27 +64,29 @@ func (g *GAERequestFilter) encodeRequest(req *http.Request) (*http.Request, erro
 	if err != nil {
 		return nil, err
 	}
-	var buf bytes.Buffer
-	err = binary.Write(&buf, binary.BigEndian, int16(len(data)))
+	var b1 bytes.Buffer
+	err = binary.Write(&b1, binary.BigEndian, int16(len(data)))
 	if err != nil {
 		return nil, err
 	}
-	_, err = buf.Write(data)
+	written := int64(2)
+	n1, err := b1.Write(data)
 	if err != nil {
 		return nil, err
 	}
-	_, err = io.Copy(&buf, req.Body)
+	written += int64(n1)
+	n2, err := io.Copy(&b1, req.Body)
 	if err != nil {
 		return nil, err
 	}
-	data, err = ioutil.ReadAll(&buf)
+	written += n2
+	url := fmt.Sprintf("%s://%s.%s%s", g.Schema, g.pickAppID(), appspotDomain, goagentPath)
+	req1, err := http.NewRequest("POST", url, &b1)
 	if err != nil {
 		return nil, err
 	}
-	return http.NewRequest(
-		"POST",
-		fmt.Sprintf("%s://%s.%s%s", g.Schema, g.pickAppID(), appspotDomain, goagentPath),
-		bytes.NewReader(data))
+	req1.Header.Add("Conntent-Length", strconv.FormatInt(written, 10))
+	return req1, nil
 }
 
 func (g *GAERequestFilter) decodeResponse(res *http.Response) (*http.Response, error) {
